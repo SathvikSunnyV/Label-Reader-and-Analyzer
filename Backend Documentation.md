@@ -10,3 +10,8 @@ Tomorrow:
 * will be checking the code by dummy codes
 * will wait for checking endpoints (scraper module, ai module, and frontend) 
 
+**Requirements**
+1. Flask
+2. requests
+3. pymongo
+4. flask_cors
