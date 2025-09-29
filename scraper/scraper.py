@@ -4,11 +4,12 @@ import requests
 import wikipediaapi
 import re
 import uvicorn
+from bs4 import BeautifulSoup
 
 # Initialize Wikipedia with proper user-agent
 wiki = wikipediaapi.Wikipedia(
     language='en',
-    user_agent='LabelReaderScraper/1.0 (dasaribhuvan305@gmail.com)'
+    user_agent='LabelReaderScraper/1.0 (contact@example.com)'
 )
 
 # Create FastAPI app
@@ -45,6 +46,26 @@ def parse_banned(text: str) -> list[str]:
         banned.extend([p.strip() for p in parts if p.strip()])
     return list(set(banned))
 
+# Extract "Uses" from Wikipedia infobox (HTML scraping)
+def fetch_usage_from_wiki_html(ingredient: str):
+    url = f"https://en.wikipedia.org/wiki/{ingredient.replace(' ', '_')}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return []
+        soup = BeautifulSoup(res.text, "html.parser")
+        infobox = soup.find("table", {"class": "infobox"})
+        if infobox:
+            for row in infobox.find_all("tr"):
+                header = row.find("th")
+                if header and "use" in header.text.lower():
+                    data = row.find("td")
+                    if data:
+                        return [d.strip() for d in data.get_text(", ").split(",")]
+    except:
+        return []
+    return []
+
 # Fetch Wikipedia description and banned countries
 def fetch_wikipedia(ingredient: str):
     page = wiki.page(ingredient)
@@ -55,18 +76,19 @@ def fetch_wikipedia(ingredient: str):
     banned = parse_banned(page.text)
     return description, banned
 
-# Fetch OpenFoodFacts tags for additional context
-def fetch_openfoodfacts(ingredient: str):
-    url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={ingredient}&search_simple=1&action=process&json=1&page_size=1"
+# Fetch OpenFoodFacts functions for additives
+def fetch_openfoodfacts_usage(ingredient: str):
     try:
-        res = requests.get(url, timeout=5)
-        data = res.json()
-        if 'products' in data and data['products']:
-            product = data['products'][0]
-            tags = product.get('ingredients_tags', [])
-            return ", ".join(tags)[:300]
+        # First try additive API
+        url = f"https://world.openfoodfacts.org/additive/{ingredient.lower().replace(' ', '-')}.json"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if "functions_tags" in data:
+                return [f.split(":")[-1].capitalize() for f in data["functions_tags"]]
     except:
-        return None
+        pass
+    return []
 
 # Fetch PubChem description (optional, chemical context)
 def fetch_pubchem(ingredient: str):
@@ -86,11 +108,12 @@ def enrich_ingredient(ingredient: str):
     normalized = normalize(ingredient)
 
     desc_wiki, banned_wiki = fetch_wikipedia(normalized)
-    desc_off = fetch_openfoodfacts(normalized)
+    usage_wiki = fetch_usage_from_wiki_html(normalized)
+    usage_off = fetch_openfoodfacts_usage(normalized)
     desc_pub = fetch_pubchem(normalized)
 
     # Merge descriptions
-    descriptions = [d for d in [desc_wiki, desc_off, desc_pub] if d]
+    descriptions = [d for d in [desc_wiki, desc_pub] if d]
     description = " ".join(descriptions) or "No description available."
 
     # Merge banned countries
@@ -98,10 +121,18 @@ def enrich_ingredient(ingredient: str):
     banned += CURATED_BANNED.get(normalized, [])
     banned = list(set(banned))
 
+    # Merge usage info (priority: OpenFoodFacts > Wikipedia infobox)
+    usage = []
+    if usage_off:
+        usage = usage_off
+    elif usage_wiki:
+        usage = usage_wiki
+
     # Track sources
     sources = []
     if desc_wiki: sources.append("Wikipedia")
-    if desc_off: sources.append("OpenFoodFacts")
+    if usage_off: sources.append("OpenFoodFacts")
+    if usage_wiki: sources.append("Wikipedia-Infobox")
     if desc_pub: sources.append("PubChem")
     if normalized in CURATED_BANNED: sources.append("Curated")
 
