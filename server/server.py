@@ -30,11 +30,18 @@ def process_ingredients():
     for ing in ingredients:
         ## calling scraper module
         try:
-            scraper_response = requests.post(SCRAPER_URL, json={"ingredient": ing})
+            scraper_response = requests.post(SCRAPER_URL, json={"ingredients": [ing]})
             scraper_response.raise_for_status()
             scraper_data = scraper_response.json()
-            usage = scraper_data.get("usage", "Usage not available")
-            banned_countries = scraper_data.get("banned_countries", [])
+
+            if scraper_data.get("results"):
+              first_result = scraper_data["results"][0]
+              usage = first_result.get("description", "Usage not available")
+              banned_countries = first_result.get("banned_in", [])
+            else:
+              usage = "Usage not available"
+              banned_countries = []
+
         except Exception as e:
             usage = f"Scraper error: {str(e)}"
             banned_countries = []
