@@ -7,6 +7,7 @@ faced issues with api routes and functionality of Database's management code
 
 Day 2 (29 09 2025):
 Tried to fix the scraper model, didn't workout
+tried different methods such as scraping from wikipedia, using selenium drivers, using ddgs(duck duck go search) and also tried to scrape from the google
 
 
 Tomorrow:
