@@ -1,0 +1,105 @@
+# 1️⃣ Imports
+from PIL import Image
+import pytesseract
+import re
+import json
+import cv2
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+# 2️⃣ Reference table for common ingredients
+ingredient_reference = {
+    "Butter": ("No", "High in saturated fat; may increase cholesterol."),
+    "Softened butter": ("No", "High in saturated fat; may increase cholesterol."),
+    "White sugar": ("No", "High in sugar; may contribute to obesity and diabetes."),
+    "Brown sugar": ("No", "High in sugar; may contribute to obesity and diabetes."),
+    "Eggs": ("Yes", "Rich in protein and essential nutrients."),
+    "Vanilla extract": ("Yes", "Safe in small amounts; adds flavor."),
+    "Baking soda": ("No", "Safe in small amounts; excessive intake may be harmful."),
+    "Hot water": ("Yes", "Safe; essential for preparation."),
+    "Salt": ("No", "Excessive salt may raise blood pressure."),
+    "Flour": ("No", "Refined flour may spike blood sugar if consumed in excess."),
+    "Chocolate chips": ("No", "High in sugar and fat; not ideal in large quantities."),
+    "Walnuts": ("Yes", "Rich in omega-3 fatty acids and protein."),
+    "On walnuts": ("Yes", "Rich in omega-3 fatty acids and protein.")
+}
+
+# 3️⃣ Function: Extract ingredients from image
+def extract_ingredients(image_path):
+    img = Image.open(image_path).convert("RGB")
+    img_cv = np.array(img)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+    gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=0)
+    gray = cv2.medianBlur(gray, 3)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    img_processed = Image.fromarray(thresh)
+    
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    ocr_text = pytesseract.image_to_string(img_processed)
+    
+    # Extract ingredients section
+    ingredients = []
+    match = re.search(r'ingredients[:\s]*(.+?)(\n[A-Z][A-Z\s]*\n|$)', ocr_text, re.IGNORECASE | re.DOTALL)
+    if match:
+        ing_text = match.group(1)
+        ing_text = re.sub(r'\s+', ' ', ing_text)
+        ingredients = [i.strip().capitalize() for i in ing_text.split(",") if i.strip()]
+    return list(dict.fromkeys(ingredients))
+
+# 4️⃣ Initialize Flan-T5 model for fallback analysis
+tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
+model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large")
+
+# 5️⃣ Analyze ingredients with reference + AI fallback
+def analyze_ingredients(ingredients):
+    final_result = []
+    unhealthy_count = 0
+    
+    for ing in ingredients:
+        # 1️⃣ Check reference table first
+        if ing in ingredient_reference:
+            healthy, reason = ingredient_reference[ing]
+        else:
+            # 2️⃣ Fallback: generative AI
+            prompt = f"Is this '{ing}' good for health or not? Answer Yes or No. If No, give the exact reason."
+            inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
+            outputs = model.generate(**inputs, max_length=128)
+            answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            if "no" in answer.lower():
+                healthy = "No"
+                reason = answer
+                unhealthy_count += 1
+            else:
+                healthy = "Yes"
+                reason = answer if answer.lower() != "yes" else f"'{ing}' is generally healthy."
+        
+        if healthy == "No":
+            unhealthy_count += 1
+        
+        final_result.append({
+            "ingredient": ing,
+            "healthy": healthy,
+            "reason": reason
+        })
+    
+    # Overall product health
+    product_health = {
+        "healthy": "Yes" if unhealthy_count == 0 else "No",
+        "reason": "All ingredients are healthy." if unhealthy_count == 0 else f"{unhealthy_count} ingredient(s) may be unhealthy."
+    }
+    
+    return {"ingredients_analysis": final_result, "product_health": product_health}
+
+# 6️⃣ Main pipeline
+def analyze_product_image(image_path):
+    ingredients = extract_ingredients(image_path)
+    return analyze_ingredients(ingredients)
+
+# 7️⃣ Example usage
+image_path = r"C:\Users\Panganuri Ragini\OneDrive\Documents\1600w-_t0n9Dbjyro.webp"
+result = analyze_product_image(image_path)
+
+# 8️⃣ Display JSON
+print(json.dumps(result, indent=4))
+
