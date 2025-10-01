@@ -45,3 +45,7 @@ wikipedia-api    # To fetch ingredient details from Wikipedia
    Output (Response)
 
 5.Returns JSON with results list:
+
+
+01-10-2025:
+    I tried my 100% for resolving the issues regarding output , but i coudn't completely solve the issue. Now it is working well but not giving  100% precise results, changes will be made to get efficient and precise results in upcomming days.
