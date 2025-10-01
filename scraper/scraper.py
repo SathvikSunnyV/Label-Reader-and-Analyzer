@@ -1,154 +1,283 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import requests
-import wikipediaapi
-import re
-import uvicorn
+#!/usr/bin/env python3
+# scraper.py -- Ingredient lookup with DDG + Wikipedia fallback
+#
+# Behavior:
+# - INS/E codes: fallback table  -> wikipedia summary (if needed)
+# - Non-INS: DuckDuckGo API -> Wikipedia Summary API -> Wikipedia HTML scrape
+# - Short, food-focused descriptions; dynamic handling of "turmeric powder" style names
+
+import sys, json, re, time, requests, random
 from bs4 import BeautifulSoup
+from html import unescape
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 
-# Initialize Wikipedia with proper user-agent
-wiki = wikipediaapi.Wikipedia(
-    language='en',
-    user_agent='LabelReaderScraper/1.0 (contact@example.com)'
-)
+# ---- Config ----
+DDG_API_TIMEOUT = 20
+WIKI_TIMEOUT = 10
+MAX_DESC_CHARS = 400
+MAX_WORKERS = 6
+DDG_RETRY = 4
+WIKI_RETRY = 3
+DEBUG = False   # set True to see network/parse errors
 
-# Create FastAPI app
-app = FastAPI()
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:129.0) Gecko/20100101 Firefox/129.0"
+]
 
-# Curated banned list (fallback for regulatory data)
-CURATED_BANNED = {
-    "ractopamine": ["China", "Russia", "EU"],
-    "potassium bromate": ["India", "EU", "Canada"],
-    "azodicarbonamide": ["Australia", "EU"]
-}
-
-# Request model
-class RequestData(BaseModel):
-    ingredients: list[str]
-
-# Normalize ingredient names
-def normalize(ingredient: str) -> str:
-    s = ingredient.lower()
-    s = re.sub(r"\bE\d+\b", "", s)
-    s = re.sub(r"\(.*?\)", "", s)
-    s = re.sub(r"[^a-z\s]", "", s)
+# ---- Helpers ----
+def clean_text(s: str):
+    if not s:
+        return ""
+    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r'\[[^\]]*\]', '', s)
     return s.strip()
 
-# Extract banned countries from text
-def parse_banned(text: str) -> list[str]:
-    banned = []
+def normalize_key(s: str) -> str:
+    return re.sub(r'\s+', ' ', unescape(str(s or "").strip().lower()))
+
+def get_with_retries(url, params=None, timeout=10, tries=3):
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    last_exc = None
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if r.status_code == 200:
+                return r
+        except Exception as e:
+            last_exc = e
+            time.sleep(1.2 * (attempt + 1))
+    if last_exc and DEBUG:
+        print(f"Request failed {url}: {last_exc}", file=sys.stderr)
+    return None
+
+def first_sentences(text, n=2):
     if not text:
-        return banned
-    pattern = r"banned in ([A-Z][a-zA-Z ,and]+)"
-    matches = re.findall(pattern, text, flags=re.IGNORECASE)
-    for m in matches:
-        parts = re.split(r",| and ", m)
-        banned.extend([p.strip() for p in parts if p.strip()])
-    return list(set(banned))
+        return ""
+    sentences = text.split(". ")
+    out = ". ".join(sentences[:n]).strip()
+    if not out.endswith("."):
+        out += "."
+    return out
 
-# Extract "Uses" from Wikipedia infobox (HTML scraping)
-def fetch_usage_from_wiki_html(ingredient: str):
-    url = f"https://en.wikipedia.org/wiki/{ingredient.replace(' ', '_')}"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return []
-        soup = BeautifulSoup(res.text, "html.parser")
-        infobox = soup.find("table", {"class": "infobox"})
-        if infobox:
-            for row in infobox.find_all("tr"):
-                header = row.find("th")
-                if header and "use" in header.text.lower():
-                    data = row.find("td")
-                    if data:
-                        return [d.strip() for d in data.get_text(", ").split(",")]
-    except:
-        return []
-    return []
+# ---- Heuristics ----
+def looks_like_food_use(text: str) -> bool:
+    """Return True if text contains food/use words (helps avoid botanical-only summaries)."""
+    if not text:
+        return False
+    kws = ["food", "used in", "cooking", "ingredient", "additive", "seasoning",
+           "flavour", "flavor", "preservative", "spice", "culinary", "color", "colour",
+           "sweetener", "thickener", "oil", "flour", "dye", "coloring", "used as"]
+    t = text.lower()
+    return any(k in t for k in kws)
 
-# Fetch Wikipedia description and banned countries
-def fetch_wikipedia(ingredient: str):
-    page = wiki.page(ingredient)
-    if not page.exists():
-        return None, None
-    summary_lines = page.summary.split(". ")
-    description = ". ".join(summary_lines[:3])  # ~3-4 lines
-    banned = parse_banned(page.text)
-    return description, banned
+def normalize_query_variants(q: str):
+    """Yield query variants to try (strip common suffixes like 'powder', 'flour')."""
+    q = q.strip()
+    yield q
+    # common suffixes to remove (helpful for 'Turmeric Powder' -> 'Turmeric')
+    suffixes = ["powder", "powdered", "flour", "meal", "extract", "oil", "powder", "crushed"]
+    for s in suffixes:
+        if q.lower().endswith(" " + s):
+            yield q[:-(len(s)+1)]
+    # also try singular/plural toggles (very basic)
+    if q.endswith("s"):
+        yield q[:-1]
+    else:
+        yield q + "s"
 
-# Fetch OpenFoodFacts functions for additives
-def fetch_openfoodfacts_usage(ingredient: str):
-    try:
-        # First try additive API
-        url = f"https://world.openfoodfacts.org/additive/{ingredient.lower().replace(' ', '-')}.json"
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if "functions_tags" in data:
-                return [f.split(":")[-1].capitalize() for f in data["functions_tags"]]
-    except:
-        pass
-    return []
+# ---- Wikipedia Summary API (tries variants) ----
+def wikipedia_summary(query):
+    if not query:
+        return ""
+    for q in normalize_query_variants(query):
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(q.replace(' ', '_'))}"
+        r = get_with_retries(url, timeout=WIKI_TIMEOUT, tries=WIKI_RETRY)
+        if not r or r.status_code != 200:
+            continue
+        try:
+            data = r.json()
+            extract = clean_text(data.get("extract", "") or "")
+            if extract:
+                return first_sentences(extract, 2)
+        except Exception as e:
+            if DEBUG:
+                print(f"Wikipedia summary parse error for {q}: {e}", file=sys.stderr)
+            continue
+    return ""
 
-# Fetch PubChem description (optional, chemical context)
-def fetch_pubchem(ingredient: str):
-    try:
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{ingredient}/description/JSON"
-        res = requests.get(url, timeout=5)
-        data = res.json()
-        if 'InformationList' in data and 'Information' in data['InformationList']:
-            info = data['InformationList']['Information'][0]
-            desc = info.get('Description', '')
-            return desc[:400]  # up to ~3-4 lines
-    except:
-        return None
+# ---- Wikipedia HTML fallback (last resort) ----
+def wikipedia_fallback(query):
+    if not query:
+        return ""
+    for q in normalize_query_variants(query):
+        url = f"https://en.wikipedia.org/wiki/{quote(q.replace(' ', '_'))}"
+        r = get_with_retries(url, timeout=WIKI_TIMEOUT, tries=WIKI_RETRY)
+        if not r:
+            continue
+        try:
+            soup = BeautifulSoup(r.text, "html.parser")
+            # Prefer first paragraphs that mention food usage
+            paras = soup.find_all("p")[:6]
+            for p in paras:
+                txt = clean_text(p.get_text(" ", strip=True))
+                if not txt:
+                    continue
+                if looks_like_food_use(txt) or len(txt) > 40:
+                    return first_sentences(txt, 2)[:MAX_DESC_CHARS]
+        except Exception as e:
+            if DEBUG:
+                print(f"Wikipedia HTML parse error for {q}: {e}", file=sys.stderr)
+            continue
+    return ""
 
-# Merge info from all sources
-def enrich_ingredient(ingredient: str):
-    normalized = normalize(ingredient)
+# ---- DuckDuckGo API snippet ----
+def ddg_api_snippet(query):
+    # Attempt several contextual queries
+    queries = [
+        f"{query} food additive", f"{query} ingredient", f"{query} food use",
+        f"{query} cooking", f"{query} edible", f"{query} seasoning"
+    ]
+    for q in queries:
+        url = f"https://api.duckduckgo.com/?q={quote(q)}&format=json&no_html=1"
+        r = get_with_retries(url, timeout=DDG_API_TIMEOUT, tries=DDG_RETRY)
+        if not r:
+            continue
+        try:
+            data = r.json()
+            # Prefer Abstract or Answer
+            for key in ("Abstract", "Answer", "Definition", "AbstractText"):
+                txt = clean_text(data.get(key, "") or "")
+                if txt and looks_like_food_use(txt):
+                    return first_sentences(txt, 2)[:MAX_DESC_CHARS]
+            # Try related topics
+            for topic in data.get("RelatedTopics", []):
+                if isinstance(topic, dict):
+                    txt = clean_text(topic.get("Text", "") or "")
+                    if txt and looks_like_food_use(txt):
+                        return first_sentences(txt, 2)[:MAX_DESC_CHARS]
+        except Exception:
+            # silent fail; fallback will handle
+            if DEBUG:
+                print(f"DDG parse error for query: {q}", file=sys.stderr)
+            continue
+    return ""
 
-    desc_wiki, banned_wiki = fetch_wikipedia(normalized)
-    usage_wiki = fetch_usage_from_wiki_html(normalized)
-    usage_off = fetch_openfoodfacts_usage(normalized)
-    desc_pub = fetch_pubchem(normalized)
+# ---- INS/E utilities (fallback table) ----
+def numeric_ins_from_token(token: str):
+    m = re.search(r'(?:E|INS)\s*(\d+)', token, re.I)
+    return m.group(1) if m else None
 
-    # Merge descriptions
-    descriptions = [d for d in [desc_wiki, desc_pub] if d]
-    description = " ".join(descriptions) or "No description available."
+# Small fallback INS map (can be expanded or populated dynamically later)
+FALLBACK_INS = {
+    "621": {"name": "Monosodium glutamate", "function": "flavour enhancer", "approved": "USA, European Union, India"},
+    "330": {"name": "Citric acid", "function": "food acid", "approved": "USA, European Union, India"},
+}
 
-    # Merge banned countries
-    banned = banned_wiki or []
-    banned += CURATED_BANNED.get(normalized, [])
-    banned = list(set(banned))
+def build_ins_description(entry: dict, ins_num: str):
+    name = entry.get("name", f"INS {ins_num}")
+    function = entry.get("function", "food additive")
+    approved = entry.get("approved", "various countries")
+    return f"{name} (INS {ins_num}). is used as {function}. Approved in: {approved}"
 
-    # Merge usage info (priority: OpenFoodFacts > Wikipedia infobox)
-    usage = []
-    if usage_off:
-        usage = usage_off
-    elif usage_wiki:
-        usage = usage_wiki
-
-    # Track sources
-    sources = []
-    if desc_wiki: sources.append("Wikipedia")
-    if usage_off: sources.append("OpenFoodFacts")
-    if usage_wiki: sources.append("Wikipedia-Infobox")
-    if desc_pub: sources.append("PubChem")
-    if normalized in CURATED_BANNED: sources.append("Curated")
-
-    return {
-        "ingredient": ingredient,
-        "description": description.strip(),
-        "banned_in": banned,
-        "sources": sources
+# ---- lookup_one (fixed indentation & dynamic summary check) ----
+def lookup_one(ingredient, ins_data, banned_lookup):
+    orig = str(ingredient or "").strip()
+    canonical = normalize_key(orig)
+    out = {
+        "Ingredient": orig,
+        "Canonical_Name": canonical,
+        "Description": "",
+        "Sources": "None",
+        "Banned_In": "None"
     }
 
-# FastAPI endpoint
-@app.post("/scrape")
-def scrape(data: RequestData):
-    results = [enrich_ingredient(i) for i in data.ingredients]
-    return {"results": results}
+    if not orig:
+        return out
 
-# Run server
+    # banned lookup (if provided)
+    v = banned_lookup.get(canonical) or banned_lookup.get(re.sub(r'[\s\-]+', '', canonical))
+    if v:
+        out["Banned_In"] = v
+
+    # Case 1: INS/E codes
+    ins_num = numeric_ins_from_token(orig)
+    if ins_num:
+        entry = ins_data.get(ins_num) or FALLBACK_INS.get(ins_num)
+        if entry:
+            out["Description"] = build_ins_description(entry, ins_num)
+            out["Sources"] = "Wikipedia INS" if ins_data.get(ins_num) else "Fallback"
+            name_key = normalize_key(entry.get("name", ""))
+            if name_key in banned_lookup:
+                out["Banned_In"] = banned_lookup[name_key]
+            return out
+        out["Description"] = "No food-specific data available."
+        return out
+
+    # Case 2: DuckDuckGo (first attempt)
+    ddg_text = ddg_api_snippet(orig)
+    if ddg_text:
+        out["Description"] = first_sentences(ddg_text, 2)[:MAX_DESC_CHARS]
+        out["Sources"] = "DuckDuckGo"
+        return out
+
+    # Case 3: Wikipedia Summary (but if summary is non-culinary, fallback to HTML)
+    summary = wikipedia_summary(orig)
+    if summary:
+        if looks_like_food_use(summary):
+            out["Description"] = first_sentences(summary, 2)[:MAX_DESC_CHARS]
+            out["Sources"] = "Wikipedia Summary"
+            return out
+        # summary exists but doesn't mention food use -> try HTML fallback
+        fallback_txt = wikipedia_fallback(orig)
+        if fallback_txt:
+            out["Description"] = first_sentences(fallback_txt, 2)[:MAX_DESC_CHARS]
+            out["Sources"] = "Wikipedia (HTML Fallback)"
+            return out
+
+    # Case 4: HTML fallback (last resort)
+    fallback = wikipedia_fallback(orig)
+    if fallback:
+        out["Description"] = first_sentences(fallback, 2)[:MAX_DESC_CHARS]
+        out["Sources"] = "Wikipedia (HTML Fallback)"
+        return out
+
+    # Nothing found
+    out["Description"] = "No food-specific data available."
+    return out
+
+# ---- Main ----
+def main():
+    try:
+        raw = sys.stdin.read()
+        if not raw:
+            user = input("Enter comma-separated ingredients: ").strip()
+            data = {"ingredients": [w.strip() for w in user.split(",") if w.strip()]}
+        else:
+            data = json.loads(raw)
+    except Exception as e:
+        print(json.dumps({"error": f"Invalid input: {e}"}))
+        return
+
+    ingredients = data.get("ingredients", [])
+    ins_data = {}        # placeholder: could be populated by scraping the INS table if desired
+    banned_lookup = {}   # optional banned ingredients map
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(ingredients) or 1)) as ex:
+        futures = {ex.submit(lookup_one, ing, ins_data, banned_lookup): ing for ing in ingredients}
+        for fut in as_completed(futures):
+            results.append(fut.result())
+
+    # preserve order
+    res_map = {r["Ingredient"]: r for r in results}
+    ordered = [res_map.get(i, {"Ingredient": i, "Canonical_Name": normalize_key(i),
+                               "Description": "No data", "Sources": "None"}) for i in ingredients]
+
+    print(json.dumps({"results": ordered}, indent=2, ensure_ascii=False))
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    main()
