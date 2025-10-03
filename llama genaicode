@@ -1,0 +1,103 @@
+#code 1: 1st code in 1/2. kindly verify both
+from huggingface_hub import InferenceClient
+import json
+import re
+
+# 🔑 Your Hugging Face token
+HF_TOKEN = "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"
+
+# Initialize client
+client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct", token=HF_TOKEN)
+
+# Ingredients list (mix normal + INS codes)
+ingredients = "Sugar, INS 621, INS 950, Sodium Nitrite, Palm Oil"
+
+# Strict JSON prompt (NO EXAMPLE)
+prompt = f"""
+You are a strict nutrition analysis system. Analyze each of the following ingredients:
+
+{ingredients}
+
+Rules:
+- If ingredient is an INS code (e.g., INS 621), expand it to its full name and explain.
+- Output must be in **valid JSON array** only.
+- Each object must include: ingredient, description, healthy (Yes/No), reason, banned_in, rating.
+"""
+
+# Run model
+response = client.chat.completions.create(
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=800
+)
+
+# Extract output
+result_text = response.choices[0].message["content"]
+
+# Try to repair JSON if needed
+def repair_json(text):
+    text = text.strip()
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    text = text.replace("'", '"')
+    return text
+
+try:
+    clean_json = repair_json(result_text)
+    result_data = json.loads(clean_json)
+    print("\n📊 Final Ingredient Analysis:\n")
+    print(json.dumps(result_data, indent=2))
+except Exception as e:
+    print("⚠️ Could not parse JSON. Raw output:\n", result_text)
+
+#code 2: 2nd code in 2/2. kindly verify this too
+
+from huggingface_hub import InferenceClient
+import json
+
+# 🔑 Your Hugging Face token
+HF_TOKEN = "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"
+
+# Initialize client
+client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct", token=HF_TOKEN)
+
+# Example ingredients including INS codes
+ingredients = "Sugar, INS 621, INS 950, Sodium Nitrite, Palm Oil"
+
+# Prompt
+prompt = f"""
+You are a nutrition expert. Analyze the following ingredients:
+
+{ingredients}
+
+Rules:
+- If an ingredient is an INS code (e.g., INS 621), explain what it stands for and its purpose in food.
+- For each ingredient, provide:
+  1. What it is and why it is used
+  2. Whether it is safe or harmful
+  3. Countries where it is banned or restricted (if any)
+  4. A health rating from 1 (worst) to 5 (best)
+
+Return the result in **valid JSON** with fields:
+ingredient, description, healthy (Yes/No), reason, banned_in, rating.
+"""
+
+# Run model in chat mode
+response = client.chat.completions.create(
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=700
+)
+
+# Extract output
+result_text = response.choices[0].message["content"]
+
+# Try to parse JSON safely
+try:
+    result_json = json.loads(result_text)
+    print("\n📊 Ingredient Analysis (JSON):\n")
+    print(json.dumps(result_json, indent=2))
+except Exception:
+    print("\n⚠️ Model did not return valid JSON, here’s raw output:\n")
+    print(result_text)
