@@ -1,100 +1,98 @@
-from flask import Flask, request, jsonify
+import os
 import requests
+from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from flask_cors import CORS
 
 app = Flask(__name__)
-### using cors for frontend requests 
-CORS(app)  
+CORS(app)
 
-### connecting to MongoDB
-client = MongoClient("mongodb://localhost:27017/")  
-db = client["label_reader"]
-alternatives_collection = db["alternatives"]
+# MongoDB config
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
+DB_NAME = os.environ.get("DB_NAME", "label_reader")
+ALTERNATIVES_COLLECTION = os.environ.get("ALTERNATIVES_COLLECTION", "alternatives")
 
-## update with actual end points 
-SCRAPER_URL = "http://localhost:5001/scrape"  
-AI_URL = "http://localhost:5002/analyze" 
+# AI service endpoint
+AI_URL = os.environ.get("AI_URL", "http://localhost:5002/analyze")
 
-### handling post request from frontend for processing ingredients
+# Initialize Mongo client
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[DB_NAME]
+alternatives_collection = db[ALTERNATIVES_COLLECTION]
+
 @app.route('/process_ingredients', methods=['POST'])
 def process_ingredients():
-    data = request.json
+    data = request.json or {}
     ingredients = data.get('ingredients', [])
-    product_type = data.get('product_type', None) 
-    
+    product_type = data.get('product_type')
+
     if not ingredients:
         return jsonify({"error": "No ingredients provided"}), 400
-    
-    results = []
-    for ing in ingredients:
-        ## calling scraper module
-        try:
-            scraper_response = requests.post(SCRAPER_URL, json={"ingredients": [ing]})
-            scraper_response.raise_for_status()
-            scraper_data = scraper_response.json()
 
-            if scraper_data.get("results"):
-              first_result = scraper_data["results"][0]
-              usage = first_result.get("description", "Usage not available")
-              banned_countries = first_result.get("banned_in", [])
-            else:
-              usage = "Usage not available"
-              banned_countries = []
+    # Send all ingredients to AI service in one request
+    try:
+        ai_resp = requests.post(AI_URL, json={"ingredients": ingredients}, timeout=30)
+        ai_resp.raise_for_status()
+        ai_data = ai_resp.json()
+        results = ai_data.get("results", [])
+    except Exception as e:
+        results = [
+            {
+                "ingredient": ing,
+                "usage": "Usage not available (AI call failed)",
+                "health": {"verdict": "Error", "reason": f"AI call failed: {str(e)}"},
+                "banned_countries": [],
+                "raw_ai_response": None
+            } for ing in ingredients
+        ]
 
-        except Exception as e:
-            usage = f"Scraper error: {str(e)}"
-            banned_countries = []
-        
-        ## calling AI module
-        try:
-            ai_response = requests.post(AI_URL, json={"ingredient": ing})
-            ai_response.raise_for_status()
-            ai_data = ai_response.json()
-            health = {
-                "verdict": ai_data.get("verdict", "Unknown"),
-                "reason": ai_data.get("reason", "Reason not available")
-            }
-        except Exception as e:
-            health = {"verdict": "Error", "reason": f"AI error: {str(e)}"}
-        
-        results.append({
-            "ingredient": ing,
-            "usage": usage,
-            "health": health,
-            "banned_countries": banned_countries
+    # Normalize AI results to match expected frontend format
+    normalized_results = []
+    for result in results:
+        normalized_results.append({
+            "ingredient": result.get("ingredient"),
+            "usage": result.get("description") or "Description not provided",
+            "health": {
+                "verdict": result.get("healthy") or "Unknown",
+                "reason": result.get("reason") or "",
+                "rating": result.get("rating")
+            },
+            "banned_countries": result.get("banned_in") or [],
+            "raw_ai_response": result.get("raw_output")
         })
-### response object to be returned
-    response = {"results": results}
-    
+
+    response = {"results": normalized_results}
+
+    # Fetch alternatives from MongoDB if product_type provided
     if product_type:
-        alternatives = []
-        alt_doc = alternatives_collection.find_one({"type": product_type.lower()})
-        if alt_doc:
-            alternatives = alt_doc.get("alternatives", [])
-        response["alternatives"] = alternatives
-    
-    return jsonify(response)
+        try:
+            alt_doc = alternatives_collection.find_one({"type": product_type.lower()})
+            response["alternatives"] = alt_doc.get("alternatives", []) if alt_doc else []
+        except Exception as e:
+            response["alternatives"] = []
+            response["warning"] = f"MongoDB query failed: {str(e)}"
 
+    return jsonify(response), 200
 
-### handling post requests from frontend for addingalternatives 
 @app.route('/add_alternatives', methods=['POST'])
 def add_alternatives():
-    """Endpoint to add healthy alternatives (for data population)."""
-    data = request.json
+    data = request.json or {}
     product_type = data.get('type')
     alts = data.get('alternatives', [])
-    
+
     if not product_type or not alts:
         return jsonify({"error": "Missing type or alternatives"}), 400
-    
-    alternatives_collection.update_one(
-        {"type": product_type.lower()},
-        {"$set": {"alternatives": alts}},
-        upsert=True
-    )
-    return jsonify({"message": "Alternatives added/updated"})
+
+    try:
+        alternatives_collection.update_one(
+            {"type": product_type.lower()},
+            {"$set": {"alternatives": alts}},
+            upsert=True
+        )
+        return jsonify({"message": "Alternatives added/updated"}), 200
+    except Exception as e:
+        return jsonify({"error": f"MongoDB update failed: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)  
-    print("App is running on http://localhost:5000")
+    print("Main backend running on http://localhost:5000")
+    app.run(debug=True, port=5000)
