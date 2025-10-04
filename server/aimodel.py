@@ -44,9 +44,9 @@ def build_prompt(ingredients: list) -> str:
     return f"""
 You are an expert nutrition and food-ingredients analyst.
 
-Analyze these ingredients: [{ingredients_str}]
+Analyze only this ingredient: "{ingredients_str}"
 
-Return a JSON array of objects, one per ingredient, with:
+Return a single JSON object (no surrounding commentary) with the following fields:
 - ingredient: string (the original ingredient)
 - description: short description (what it is and why used)
 - healthy: "Yes" or "No" or "Unknown"
@@ -55,12 +55,9 @@ Return a JSON array of objects, one per ingredient, with:
 - rating: integer 1..5 (1 worst, 5 best)
 
 Example:
-[
-    {{"ingredient":"Sugar","description":"Sweetener","healthy":"No","reason":"High glycemic index","banned_in":[],"rating":2}},
-    {{"ingredient":"Salt","description":"Flavor enhancer","healthy":"Yes","reason":"Safe in moderation","banned_in":[],"rating":4}}
-]
+{{"ingredient":"X","description":"...","healthy":"Yes","reason":"...","banned_in":[],"rating":4}}
 
-Return only valid JSON (array). Keep answers concise.
+Return only valid JSON (object). Keep answers concise.
 """
 
 @app.route("/analyze", methods=["POST"])
