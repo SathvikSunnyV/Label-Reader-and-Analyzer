@@ -5,14 +5,14 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from huggingface_hub import InferenceClient
 
-# CONFIG
+
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN env var not set.")
 
 HF_MODEL = os.environ.get("HF_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct")
 
-# Initialize HF client
+# Initializing HF client
 hf_client = InferenceClient(token=HF_TOKEN)
 
 app = Flask(__name__)
@@ -76,7 +76,7 @@ def analyze():
         resp = hf_client.chat_completion(
             model=HF_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000  # Increased for multiple ingredients
+            max_tokens=2000  
         )
         result_text = resp.choices[0].message.content
     except Exception as e:
@@ -127,7 +127,6 @@ def analyze():
                 "parse_status": "ok",
                 "raw_output": None
             })
-        # Ensure all ingredients are returned, even if missing in AI response
         for ing in ingredients:
             if not any(r["ingredient"] == ing for r in results):
                 results.append({

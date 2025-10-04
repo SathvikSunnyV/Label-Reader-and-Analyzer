@@ -7,15 +7,15 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# MongoDB config
+
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME = os.environ.get("DB_NAME", "label_reader")
 ALTERNATIVES_COLLECTION = os.environ.get("ALTERNATIVES_COLLECTION", "alternatives")
 
-# AI service endpoint
+# AI model endpoint
 AI_URL = os.environ.get("AI_URL", "http://localhost:5002/analyze")
 
-# Initialize Mongo client
+# Initializing Mongo client
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 alternatives_collection = db[ALTERNATIVES_COLLECTION]
@@ -29,7 +29,6 @@ def process_ingredients():
     if not ingredients:
         return jsonify({"error": "No ingredients provided"}), 400
 
-    # Send all ingredients to AI service in one request
     try:
         ai_resp = requests.post(AI_URL, json={"ingredients": ingredients}, timeout=30)
         ai_resp.raise_for_status()
@@ -46,7 +45,6 @@ def process_ingredients():
             } for ing in ingredients
         ]
 
-    # Normalize AI results to match expected frontend format
     normalized_results = []
     for result in results:
         normalized_results.append({
@@ -63,7 +61,6 @@ def process_ingredients():
 
     response = {"results": normalized_results}
 
-    # Fetch alternatives from MongoDB if product_type provided
     if product_type:
         try:
             alt_doc = alternatives_collection.find_one({"type": product_type.lower()})
