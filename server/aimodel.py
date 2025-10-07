@@ -4,7 +4,8 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from huggingface_hub import InferenceClient
-
+from dotenv import load_dotenv
+load_dotenv()
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
@@ -22,7 +23,7 @@ def repair_json(text: str) -> str:
     if not text:
         return ""
     text = text.strip()
-    m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+    m = re.search(r"(\[.*\])", text, re.DOTALL)  # Expect array
     if m:
         text = m.group(0)
     text = text.replace("'", '"')
@@ -41,12 +42,16 @@ def parse_model_json(text: str):
 
 def build_prompt(ingredients: list) -> str:
     ingredients_str = ", ".join(f'"{ing}"' for ing in ingredients)
+    example = '[{"ingredient":"X","description":"...","healthy":"Yes","reason":"...","banned_in":[],"rating":4}]'
+    if len(ingredients) > 1:
+        example = '[{"ingredient":"X","description":"...","healthy":"Yes","reason":"...","banned_in":[],"rating":4}, {"ingredient":"Y","description":"...","healthy":"No","reason":"...","banned_in":["USA"],"rating":2}]'
+    
     return f"""
 You are an expert nutrition and food-ingredients analyst.
 
-Analyze only this ingredient: "{ingredients_str}"
+Analyze these ingredients: {ingredients_str}
 
-Return a single JSON object (no surrounding commentary) with the following fields:
+Return a JSON array of objects (no surrounding commentary), each with the following fields:
 - ingredient: string (the original ingredient)
 - description: short description (what it is and why used)
 - healthy: "Yes" or "No" or "Unknown"
@@ -55,9 +60,9 @@ Return a single JSON object (no surrounding commentary) with the following field
 - rating: integer 1..5 (1 worst, 5 best)
 
 Example:
-{{"ingredient":"X","description":"...","healthy":"Yes","reason":"...","banned_in":[],"rating":4}}
+{example}
 
-Return only valid JSON (object). Keep answers concise.
+Return only valid JSON (array). Keep answers concise.
 """
 
 @app.route("/analyze", methods=["POST"])
@@ -122,7 +127,7 @@ def analyze():
                 "banned_in": banned,
                 "rating": rating,
                 "parse_status": "ok",
-                "raw_output": None
+                "raw_output": result_text
             })
         for ing in ingredients:
             if not any(r["ingredient"] == ing for r in results):
@@ -137,6 +142,9 @@ def analyze():
                     "raw_output": result_text
                 })
         return jsonify({"results": results}), 200
+    elif isinstance(parsed, dict):
+        # If model returns single object, wrap in list
+        return analyze()  # Retry or handle, but for simplicity, treat as list of one
     else:
         return jsonify({
             "results": [
