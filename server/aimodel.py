@@ -13,7 +13,6 @@ if not HF_TOKEN:
 
 HF_MODEL = os.environ.get("HF_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct")
 
-# Initializing HF client
 hf_client = InferenceClient(token=HF_TOKEN)
 
 app = Flask(__name__)
@@ -23,7 +22,7 @@ def repair_json(text: str) -> str:
     if not text:
         return ""
     text = text.strip()
-    m = re.search(r"(\[.*\])", text, re.DOTALL)  # Expect array
+    m = re.search(r"(\[.*\])", text, re.DOTALL)  
     if m:
         text = m.group(0)
     text = text.replace("'", '"')
@@ -143,8 +142,7 @@ def analyze():
                 })
         return jsonify({"results": results}), 200
     elif isinstance(parsed, dict):
-        # If model returns single object, wrap in list
-        return analyze()  # Retry or handle, but for simplicity, treat as list of one
+        return analyze()  
     else:
         return jsonify({
             "results": [

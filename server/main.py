@@ -13,10 +13,8 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME = os.environ.get("DB_NAME", "label_reader")
 INGREDIENTS_COLLECTION = os.environ.get("INGREDIENTS_COLLECTION", "ingredients")
 
-# AI model endpoint
 AI_URL = os.environ.get("AI_URL", "http://localhost:5002/analyze")
 
-# Initializing Mongo client
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 ingredients_collection = db[INGREDIENTS_COLLECTION]
@@ -29,10 +27,8 @@ def process_ingredients():
     if not ingredients:
         return jsonify({"error": "No ingredients provided"}), 400
 
-    # Normalize ingredients to lowercase for caching/lookup
     lower_to_original = {ing.lower(): ing for ing in ingredients}
 
-    # Find cached ingredients
     cached_results = {}
     missing = []
     for ing in ingredients:
@@ -65,7 +61,6 @@ def process_ingredients():
                 }
                 ai_normalized.append(normalized)
                 
-                # Cache the normalized result
                 lower = normalized['ingredient'].lower()
                 ingredients_collection.update_one(
                     {"_id": lower},
@@ -82,9 +77,8 @@ def process_ingredients():
                     "raw_ai_response": None
                 }
                 ai_normalized.append(normalized)
-                # Optionally cache errors, but here we skip caching errors to avoid persisting failures
+             
 
-    # Combine results in the order of input ingredients
     normalized_results = []
     ai_map = {norm['ingredient']: norm for norm in ai_normalized}
     for ing in ingredients:
@@ -93,7 +87,6 @@ def process_ingredients():
         elif ing in ai_map:
             normalized_results.append(ai_map[ing])
         else:
-            # Fallback if somehow missing
             normalized_results.append({
                 "ingredient": ing,
                 "usage": "Usage not available",
